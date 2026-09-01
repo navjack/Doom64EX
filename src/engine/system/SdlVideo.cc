@@ -214,6 +214,18 @@ class SdlVideo : public IVideo {
         copy.width = std::max(copy.width, 320);
         copy.height = std::max(copy.height, 240);
 
+        // Windowed mode takes its render size from the window itself (the viewport follows the
+        // drawable), so the configured resolution only bounds the *initial* window here. Clamp it
+        // to the desktop: window sizes are in points, and a stored 3840x2160 asks for a window
+        // twice the size of a 2x-scaled 1920x1080 desktop -- offscreen and impossible to grab.
+        if (copy.fullscreen == Fullscreen::none) {
+            SDL_Rect usable;
+            if (SDL_GetDisplayUsableBounds(0, &usable) == 0 && usable.w > 0 && usable.h > 0) {
+                copy.width = std::min(copy.width, usable.w);
+                copy.height = std::min(copy.height, usable.h);
+            }
+        }
+
         if (copy.depth_size != 8 && copy.depth_size != 16 && copy.depth_size != 24)
             copy.depth_size = 24;
 
@@ -307,6 +319,32 @@ public:
         SDL_Quit();
     }
 
+    // The window size is in points; the framebuffer is in pixels. They differ by the display
+    // scale (2x here), so everything that feeds glViewport and the render math must use the
+    // drawable size. current_mode() deliberately keeps reporting points, because Alt+Enter
+    // feeds it straight back into set_mode() -- handing it pixels there would recreate the
+    // window at twice the requested size.
+    void store_drawable_size_()
+    {
+        int w = 0, h = 0;
+        SDL_GL_GetDrawableSize(sdl_window_, &w, &h);
+        if (w <= 0 || h <= 0)
+            SDL_GetWindowSize(sdl_window_, &w, &h);
+        if (w > 0 && h > 0) {
+            video_width = w;
+            video_height = h;
+            video_ratio = static_cast<float>(video_width) / video_height;
+        }
+    }
+
+    void apply_drawable_viewport_()
+    {
+        store_drawable_size_();
+        glViewport(0, 0, video_width, video_height);
+        GL_CalcViewSize();
+        R_SetViewMatrix();
+    }
+
     void set_mode(const VideoMode& mode) override
     {
         VideoMode copy = sanitize_mode_(mode);
@@ -319,9 +357,14 @@ public:
             // Prepare SDL's GL attributes
             init_gl_();
 
-            uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS;
+            // ALLOW_HIGHDPI: without it macOS gives a 1x backing store and scales the window up,
+            // so on a 2x display a 1920x1080 window covers a whole 3840x2160 panel and a 3840x2160
+            // request needs a 7680x4320 backing store -- unreachable and unresizable.
+            uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS
+                         | SDL_WINDOW_ALLOW_HIGHDPI;
             switch (copy.fullscreen) {
             case Fullscreen::none:
+                flags |= SDL_WINDOW_RESIZABLE;
                 break;
 
             case Fullscreen::noborder:
@@ -348,6 +391,10 @@ public:
 
             if (!sdl_glcontext_)
                 throw video_error { format("Couldn't create OpenGL Context: {}", SDL_GetError()) };
+
+            // Record the real backing-store size. Deliberately no GL calls yet -- glad has not
+            // been loaded at this point in startup.
+            store_drawable_size_();
         } else {
             SDL_SetWindowSize(sdl_window_, copy.width, copy.height);
 
@@ -365,11 +412,7 @@ public:
                 break;
             }
 
-            SDL_GetWindowSize(sdl_window_, &video_width, &video_height);
-            video_ratio = static_cast<float>(video_width) / video_height;
-            glViewport(0, 0, video_width, video_height);
-            GL_CalcViewSize();
-            R_SetViewMatrix();
+            apply_drawable_viewport_();
         }
 
         v_width = copy.width;
@@ -510,6 +553,23 @@ public:
 
                 case SDL_WINDOWEVENT_LEAVE:
                     has_mouse_ = false;
+                    break;
+
+                // The window is resizable now, and a display change can alter the backing
+                // scale, so re-read the drawable size instead of leaving a stale viewport.
+                case SDL_WINDOWEVENT_SIZE_CHANGED:
+                    apply_drawable_viewport_();
+                    // Remember the dragged size (in points, which is what set_mode consumes) so
+                    // the window reopens as the user left it.
+                    if (!(SDL_GetWindowFlags(sdl_window_)
+                          & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
+                        int ww = 0, wh = 0;
+                        SDL_GetWindowSize(sdl_window_, &ww, &wh);
+                        if (ww > 0 && wh > 0) {
+                            v_width = ww;
+                            v_height = wh;
+                        }
+                    }
                     break;
 
                 default:

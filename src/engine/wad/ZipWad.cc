@@ -230,7 +230,23 @@ namespace {
 
           stream_.seekg(header.name_length + header.extra_length, std::ios::cur);
 
-          String cache(header.uncompressed, 0);
+          // Use the size recorded in the CENTRAL DIRECTORY (info.size), not the one in the
+          // LocalFileHeader. Writers that emit data descriptors (general purpose bit 3) -- which
+          // is what CMake's `-E tar --format=zip` does -- leave the local header's sizes as 0.
+          // Trusting them made avail_out 0, so the inflate loop exited immediately and every
+          // lump came back empty: MAPINFO parsed to zero maps and starting a game bounced
+          // silently back to the title screen.
+          const size_t out_size = info.size;
+
+          // Stored entries carry no deflate stream; copy them straight out.
+          if (!info.compressed) {
+              String raw(out_size, 0);
+              if (out_size > 0)
+                  stream_.read(&raw[0], static_cast<std::streamsize>(out_size));
+              return std::make_unique<ZipLump>(lump_index, std::istringstream { std::move(raw) });
+          }
+
+          String cache(out_size, 0);
           z_stream zs {};
           char buffer[32] {};
 
@@ -239,7 +255,7 @@ namespace {
 		  zs.next_in = reinterpret_cast<byte*>(buffer);
 		  zs.avail_in = sizeof(buffer);
 		  zs.next_out = reinterpret_cast<byte*>(&cache[0]);
-		  zs.avail_out = header.uncompressed;
+		  zs.avail_out = static_cast<uInt>(out_size);
 		  zs.zalloc = [](voidpf, uInt items, uInt size) -> voidpf { return malloc(items * size); };
 		  zs.zfree = [](voidpf, voidpf address) { free(address); };
 

@@ -50,8 +50,15 @@ void I_InitScreen(void) {
 
     auto mode = Video->current_mode();
 
-    video_width = mode.width;
-    video_height = mode.height;
+    // current_mode() reports the window size in POINTS, because Alt+Enter feeds it straight
+    // back into set_mode(). The renderer needs PIXELS: GL_CalcViewSize() derives ViewWidth from
+    // video_width, so assigning points here on a 2x display left the game drawing into the
+    // bottom-left quadrant of a double-sized framebuffer. The video backend already stored the
+    // drawable size, so only fall back to the mode if nothing set it.
+    if (video_width <= 0 || video_height <= 0) {
+        video_width = mode.width;
+        video_height = mode.height;
+    }
     video_ratio = static_cast<float>(video_width) / video_height;
 
     // if(M_CheckParm("-window")) {

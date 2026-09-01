@@ -16,3 +16,7 @@
 # conan
 conanbuildinfo.cmake
 conaninfo.txt
+
+# --- macOS port: build artifacts, ROMs and local machine state ---
+*.app/
+.DS_Store
